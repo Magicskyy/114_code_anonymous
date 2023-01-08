@@ -1,0 +1,268 @@
+---
+title: "fire"
+date: "2022-12-29"
+output: html_document
+---
+Library
+```{r}
+library(spatstat)
+library(here)
+library(sp)
+library(tidyverse)
+library(maptools)
+library(tmap)
+library(sf)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
+library(janitor)
+library(spdep)
+library(rgeos)
+library(spatialreg)
+library(ggplot2)
+```
+
+```{r}
+#Read the fire dataset
+fire <- read_csv(here::here("AoLR Data collection 2017.csv"),
+                skip=1,
+                locale = locale(encoding = "latin1")) %>%
+  clean_names 
+```
+```{r}
+# read the shapefile of london borough
+london <- read_sf(here::here("statistical-gis-boundaries-london","ESRI","London_Borough_Excluding_MHW.shp"))
+```
+
+```{r}
+#select the coloum I need and rewrite the ward code of the city of london
+fire <- fire %>%
+  dplyr::select(ward_code,ward_name,density,crime,over_crowding,smokers,x1_pump_fires,x2_pump_fires) %>% 
+  mutate(fires = x1_pump_fires + x2_pump_fires)%>%
+  na.omit()
+
+fire$ward_code[which(fire$ward_name =='City of London')] <- 'E09000001'
+  
+```
+```{r}
+#read the shapefile of london ward
+ward <- read_sf(here::here("statistical-gis-boundaries-london","ESRI","London_Ward_CityMerged.shp"))
+```
+```{r}
+#merge the ward file and the dataset
+fire_shp <- ward %>%
+  left_join(.,fire,
+            by = c('GSS_CODE'='ward_code'))
+```
+
+```{r}
+#have a look at the empty map and check it
+tmap_mode("plot")+
+  tm_shape(ward)+
+  tm_polygons()+
+  tm_scale_bar(position = c("left", "bottom"))
+```
+
+```{r}
+# use scatter plot t show the variable
+ggplot(fire)+
+  geom_point(aes(x=crime,y=fires),color="#de2d26")+
+  geom_point(aes(x=over_crowding,y=fires),color="yellow")+
+  geom_point(aes(x=smokers,y=fires),color="#3182bd")+
+  labs(title="            red : reported crimes to fires 
+            yellow : overcrowding households to fires
+            blue : smokers to fire")
+```
+```{r}
+#use scatter plot to show the log value of the variable.
+ggplot(fire)+
+  geom_point(aes(x=log10(crime),y=log10(fires)),color="#de2d26")+
+  geom_point(aes(x=log10(over_crowding),y=log10(fires)),color="yellow")+
+  geom_point(aes(x=log10(smokers),y=log10(fires)),color="#3182bd")+
+  labs(title="            red : reported crimes to fires 
+            yellow : overcrowding households to fires
+            blue : smokers to fire")
+```
+
+
+```{r}
+# Plot the fire distribution map, and add a compass, scale bar
+Londonfire_bo <- tm_shape(fire_shp) + tm_fill("fires", style = "quantile", n = 5, palette = "OrRd") +
+tm_compass(position = c("right", "top")) +
+tm_scale_bar(position = c("left", "bottom")) +
+tm_layout(frame = FALSE, legend.title.size = 0.5, legend.text.size = 0.5)
+
+
+Londonfire_bo
+```
+```{r}
+#plot the distribution of the over crowding households
+Londonover_bo <- tm_shape(fire_shp) + tm_fill("over_crowding", style = "quantile", n = 5, palette = "PuBu") +
+tm_scale_bar(position = c("left", "bottom")) +
+tm_layout(frame = FALSE, legend.title.size = 0.8, legend.text.size = 0.6)+
+tm_compass(position = c("left", "top")) 
+
+Londonover_bo
+```
+```{r}
+#plot the distribution of crimes
+Londoncrime_bo <- tm_shape(fire_shp) + tm_fill("crime", style = "quantile", n = 5, palette = "PuBu") +
+tm_scale_bar(position = c("left", "bottom")) +
+tm_layout(frame = FALSE, legend.title.size = 1, legend.text.size = 0.6)+
+tm_compass(position = c("left", "top")) 
+
+Londoncrime_bo
+```
+
+```{r}
+#plot the distribution of smokers
+Londonsmokers_bo <- tm_shape(fire_shp) + tm_fill("smokers", style = "quantile", n = 5, palette = "PuBu") +
+tm_scale_bar(position = c("left", "bottom")) +
+tm_layout(frame = FALSE, legend.title.size = 1, legend.text.size = 0.6)+
+tm_compass(position = c("left", "top")) 
+
+Londonsmokers_bo
+```
+```{r}
+# show the three maps together
+tmap_arrange(Londoncrime_bo,Londonover_bo,Londonsmokers_bo, nrow = 2)
+```
+
+
+```{r}
+#create a multivariate model set the fires as the depedent vairalbe.
+modelMLR <- lm(log10(fires) ~ log10(over_crowding)+ log10(crime) + log10(smokers), data = fire_shp)
+options(scipen = 7)
+# show the result of the model
+summary(modelMLR)
+```
+```{r}
+# extract the residuals value to the fire_shp and show the result.
+fire_shp$RESIDUALS <- modelMLR$residuals
+summary(fire_shp$RESIDUALS)
+```
+```{r}
+# plot the distribution of the residuals
+tm_shape(fire_shp) + tm_fill("RESIDUALS", style = "cont", midpoint = 0, palette = "-RdBu") +
+tm_compass(position = c("right", "top")) +
+tm_scale_bar(position = c("left", "bottom")) +
+tm_layout(frame = FALSE, legend.title.size = 0.5, legend.text.size = 0.5)
+```
+```{r}
+# transform the original to a new spatial file,create a weight matrix,Use Moran's I to check the auto correlation. 
+fire_shp$ROWNUM <- 1:nrow(fire_shp)
+spatialdatafile_2.0 <- as(fire_shp, "Spatial")
+Weights <- poly2nb(spatialdatafile_2.0, row.names = spatialdatafile_2.0$ROWNUM)
+WeightsMatrix <- nb2mat(Weights, style='B')
+Residual_WeightMatrix <- mat2listw(WeightsMatrix , style='W')
+lm.morantest(modelMLR, Residual_WeightMatrix, alternative="two.sided")
+```
+## Moran
+```{r}
+# use scatter plot to show the moran distribution in london
+fire_nb <- poly2nb(fire_shp, row.names=fire_shp$fires)
+nb_weights_list <- nb2listw(fire_nb, style='W')
+moran.plot(fire_shp$fires, nb_weights_list,
+           zero.policy = T,
+           labels = F,
+           pch = 20, cex = 0.1)
+```
+
+```{r}
+local_moran <- localmoran(fire_shp$fires, nb_weights_list)
+fire_shp$scale_n_fires <- scale(fire_shp$fires)
+fire_shp$lag_scale_n_fires <- lag.listw(nb_weights_list, fire_shp$scale_n_fires)
+moran_stats <- st_as_sf(fire_shp)
+```
+```{r}
+# set the significance value and classificate the value.
+sig_level <- 0.1
+moran_stats$quad_sig <- ifelse(moran_stats$scale_n_fires > 0 & 
+                                          moran_stats$lag_scale_n_fires > 0 & 
+                                          local_moran[,5] <= sig_level, 
+                                          'high-high', 
+                                   ifelse(moran_stats$scale_n_fires <= 0 & 
+                                          moran_stats$lag_scale_n_fires <= 0 & 
+                                          local_moran[,5] <= sig_level, 
+                                          'low-low', 
+                                   ifelse(moran_stats$scale_n_fires > 0 & 
+                                          moran_stats$lag_scale_n_fires <= 0 & 
+                                          local_moran[,5] <= sig_level, 
+                                          'high-low', 
+                                   ifelse(moran_stats$scale_n_fires <= 0 & 
+                                          moran_stats$lag_scale_n_fires > 0 & 
+                                          local_moran[,5] <= sig_level, 
+                                          'low-high',
+                                   ifelse(local_moran[,5] > sig_level, 
+                                          'not-significant', 
+                                          'not-significant')))))
+moran_stats$quad_non_sig <- ifelse(moran_stats$scale_n_fires > 0 & 
+                                              moran_stats$lag_scale_n_fires > 0, 
+                                              'high-high', 
+                                       ifelse(moran_stats$scale_n_fires <= 0 & 
+                                              moran_stats$lag_scale_n_fires <= 0, 
+                                              'low-low', 
+                                       ifelse(moran_stats$scale_n_fires > 0 & 
+                                              moran_stats$lag_scale_n_fires <= 0, 
+                                              'high-low', 
+                                       ifelse(moran_stats$scale_n_fires <= 0 & 
+                                              moran_stats$lag_scale_n_fires > 0,
+                                              'low-high',NA))))
+```
+
+```{r}
+#plot the local moran on the map
+tm_shape(moran_stats) +
+    tm_fill(col = 'quad_non_sig', palette = c("#de2d26", "#deebf7", "#3182bd", "#fee0d2"))
+tm_shape(moran_stats) +
+    tm_fill(col = 'quad_sig', palette = c("#de2d26", "#fee0d2", "white")) +
+    tm_borders(col = "grey")
+```
+
+## SLY
+```{r}
+# create a spatial lag model
+modelSLY <- lagsarlm(log10(fires) ~ log10(over_crowding) + log10(crime) + log10(smokers), data = spatialdatafile_2.0, Residual_WeightMatrix)
+```
+```{r}
+summary(modelSLY)
+```
+```{r}
+# extract the residuals value to the fire_shp and show the result.
+fire_shp$RESID_SLY <- modelSLY$residuals
+moran.mc(fire_shp$RESID_SLY, Residual_WeightMatrix, 1000, zero.policy = T)
+```
+```{r}
+# plot the residuals of slag model
+tm_shape(fire_shp) + tm_fill("RESID_SLY", style = "cont", midpoint = 0, palette = "-RdBu") +
+    tm_compass(position = c("right", "top")) +
+    tm_scale_bar(position = c("left", "bottom")) +
+    tm_layout(frame = FALSE, legend.title.size = 0.5, legend.text.size = 0.5)
+```
+```{r}
+# show the result
+Weights_2.0 <- as(Residual_WeightMatrix, "CsparseMatrix")
+trMC <- trW(Weights_2.0, type="MC")
+summary(impacts(modelSLY, tr = trMC, R=100), zstats=TRUE)
+```
+## SER
+```{r}
+#create a spatial error model
+modelSER <- errorsarlm(log10(fires) ~ log10(over_crowding) + log10(crime) + log10(smokers), data = spatialdatafile_2.0, Residual_WeightMatrix)
+```
+```{r}
+#show the result of the spatial error model
+summary(modelSER)
+```
+```{r}
+# show the result of the Moran's I
+fire_shp$RESID_SER <- modelSER$residuals
+moran.mc(fire_shp$RESID_SER, Residual_WeightMatrix, 1000, zero.policy = T)
+```
+```{r}
+# plot the residuals of the spatial error model
+tm_shape(fire_shp) + tm_fill("RESID_SER", style = "cont", midpoint = 0, palette = "-RdBu") +
+    tm_compass(position = c("right", "top")) +
+    tm_scale_bar(position = c("left", "bottom")) +
+    tm_layout(frame = FALSE, legend.title.size = 0.5, legend.text.size = 0.5)
+```
